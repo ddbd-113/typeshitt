@@ -715,6 +715,91 @@ fn log_memory_map() {
         groups.len(),
         biggest.join("; ")
     );
+    // Mappings at host addresses and the other big private allocations,
+    // by size and by the file a mapping shows (resident bytes too).
+    {
+        use windows_sys::Win32::System::ProcessStatus::K32GetMappedFileNameW;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut by: HashMap<(usize, usize, String), (u64, u64, u64)> = HashMap::new();
+        let mut seen: HashMap<usize, bool> = HashMap::new();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        let mut probe: Vec<([usize; 2], (usize, usize, String), u64)> = Vec::new();
+        for r in regions.iter().filter(|r| r.3) {
+            let k = kind(r);
+            if k != 8 && k != 6 && k != 4 && k != 0 && k != 1 {
+                continue;
+            }
+            let size = whole.get(&r.0).copied().unwrap_or(0);
+            let mut name = String::new();
+            if k == 8 && !seen.contains_key(&r.0) {
+                let mut buf = [0u16; 260];
+                // SAFETY: our process, a buffer of its length.
+                let n = unsafe { K32GetMappedFileNameW(GetCurrentProcess(), r.0 as *const _, buf.as_mut_ptr(), buf.len() as u32) };
+                name = String::from_utf16_lossy(&buf[..n as usize]);
+                if let Some(i) = name.rfind(char::from(92u8)) { name = name[i + 1..].to_string(); }
+            }
+            let first = seen.insert(r.0, true).is_none();
+            let key = (k, if k == 8 || k == 6 { size } else { 0 }, if name.is_empty() { names.get(&r.0).cloned().unwrap_or_default() } else { name });
+            names.insert(r.0, key.2.clone());
+            let e = by.entry(key.clone()).or_default();
+            if first { e.0 += 1; }
+            e.1 += r.2 as u64;
+            let mut offset = 0;
+            while offset < r.2 {
+                probe.push(([r.1 + offset, 0], key.clone(), STEP.min(r.2 - offset) as u64));
+                offset += STEP;
+            }
+        }
+        for chunk in probe.chunks_mut(4096) {
+            let mut asked: Vec<[usize; 2]> = chunk.iter().map(|c| c.0).collect();
+            // SAFETY: our own process; entries of two words each.
+            let ok = unsafe { windows_sys::Win32::System::ProcessStatus::K32QueryWorkingSetEx(GetCurrentProcess(), asked.as_mut_ptr().cast(), (asked.len() * 16) as u32) } != 0;
+            if ok {
+                for (a, c) in asked.iter().zip(chunk.iter()) {
+                    if a[1] & 1 != 0 {
+                        if let Some(e) = by.get_mut(&c.1) { e.2 += c.2; }
+                    }
+                }
+            }
+        }
+        let mut by: Vec<_> = by.into_iter().collect();
+        by.sort_by_key(|b| std::cmp::Reverse(b.1.1));
+        let text: Vec<String> = by.iter().take(24).map(|((k, size, name), (n, bytes, here))| {
+            format!("[{k}] {n} of {:.1} MB {name}: {} MB ({} in memory)", *size as f64 / (1 << 20) as f64, bytes >> 20, here >> 20)
+        }).collect();
+        tracing::info!("memory map, mappings and big allocations by size and file: {}", text.join("; "));
+    }
+    // The same allocations by who made the buffer mapped in them
+    // ([`note_mapped`]): the newest buffer noted inside each.
+    let noted = MAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut owners: HashMap<String, (u64, u64)> = HashMap::new();
+    for (base, &(k, bytes)) in &by_allocation {
+        let end = base + whole.get(base).copied().unwrap_or(0);
+        let who = noted
+            .range(*base..end)
+            .next_back()
+            .map(|(_, (_, tag, at))| format!("{tag} {}:{}", at.file(), at.line()))
+            .unwrap_or_else(|| "(none of ours)".into());
+        let who = format!("{}{who}", if k == 5 { "wc " } else { "" });
+        let o = owners.entry(who).or_default();
+        o.0 += 1;
+        o.1 += bytes;
+    }
+    drop(noted);
+    let mut owners: Vec<(String, (u64, u64))> = owners.into_iter().collect();
+    owners.sort_by_key(|o| std::cmp::Reverse(o.1.1));
+    let owners: Vec<String> = owners.iter().take(16).map(|(who, (n, bytes))| format!("{who}: {n} {} MB", bytes >> 20)).collect();
+    tracing::info!("memory map, those allocations by maker: {}", owners.join("; "));
+}
+
+/// Buffers of ours mapped for the CPU, by where their mapping begins: bytes,
+/// kind, and who made them (diagnostics; for [`log_memory_map`]).
+static MAPPED: std::sync::Mutex<std::collections::BTreeMap<usize, (u64, &'static str, &'static std::panic::Location<'static>)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Notes a buffer just mapped at `at` (see [`MAPPED`]).
+pub(crate) fn note_mapped(at: usize, bytes: u64, tag: &'static str, who: &'static std::panic::Location<'static>) {
+    MAPPED.lock().unwrap_or_else(|e| e.into_inner()).insert(at, (bytes, tag, who));
 }
 
 /// Logs where the memory is: the process and the PC, then what this crate
