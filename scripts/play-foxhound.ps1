@@ -16,7 +16,7 @@
 # %LOCALAPPDATA%\victory\logs. Every VICTORY_... switch is described in a comment where the code reads it.
 param(
     [Parameter(Mandatory)][string]$Exe,
-    [ValidateSet('diag', 'release')][string]$Build = 'release',
+    [ValidateSet('diag', 'release', 'fast')][string]$Build = 'release',
     [switch]$SeriesS,
     # 1440: output and scene 2560x1440 (Series X, the image is patched); 1080to1440: scene 1920x1080 upscaled by
     # the title; 4k: the stock Series X output (3840x2160).
@@ -138,6 +138,7 @@ if (-not (Test-Path $victory)) {
     Push-Location $repo
     try {
         if ($Build -eq 'diag') { cargo build --locked --profile diag -p victory --features diagnostics }
+        elseif ($Build -eq 'fast') { cargo build --locked --profile fast -p victory }
         else { cargo build --release --locked -p victory }
     } finally { Pop-Location }
     if (-not (Test-Path $victory)) { Write-Host "The build did not make $victory."; return }
