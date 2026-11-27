@@ -88,6 +88,9 @@ $settings = @{
     # free, and cut on a 1 MB grid instead of 4 MB. RTX 5070 Ti, 32 GB, 150 s: 2.4 GB less private, 2.5 GB more
     # available at the end, the same frame rate (runs rel-base-b and rel-winbar-kb1024).
     VICTORY_WINDOWS_BAR_MB = '3072'; VICTORY_WINDOW_KB = '1024'   # the BAR part: not with frame generation on (below)
+    # Keyboard and mouse as on PC (gameinput.rs, `Pc`): the mouse turns the camera, held inside the window and
+    # brought back to its middle; F2 shows which key is which pad button. A pad, when one is on, works as well.
+    VICTORY_PC_CONTROLS = '1'; VICTORY_MOUSE_CAPTURE = '1'; VICTORY_MOUSE_WARP = '1'; VICTORY_KEY_LEGEND = '1'
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
