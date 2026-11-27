@@ -176,6 +176,156 @@ fn fallback(keys: &[KeyState]) -> PadState {
     }
 }
 
+/// The PC layout of the keyboard and mouse (`VICTORY_PC_CONTROLS=1`, the launcher's
+/// default; off: [`fallback`], the plain stand-in pad), close to the title's PC
+/// cousins: W A S D move, the mouse turns the camera (the right stick), Shift
+/// runs (A, tapped while held: `VICTORY_SPRINT_TAP=0` holds it), Space jumps
+/// (X), F gets in and out (Y), R reloads (B), Q takes cover (RB), Tab is the
+/// weapon wheel (LB), the right mouse button aims (LT) and the left one shoots
+/// (RT), Ctrl crouches (L3), C looks behind (R3), E is the D-pad's right, V the
+/// View button, Esc the Menu one, the arrows the D-pad, Enter and Backspace A
+/// and B for menus. The title's pad has no keyboard to tell walking from
+/// driving, so this has a driving map of its own: F switches to it and back
+/// (the getting in and out it also presses), G alone does too; there W is
+/// the gas (RT), S the brake (LT), Space the handbrake (RB), the left mouse
+/// button shoots (LB) and E the horn (L3). The key legend (F2) shows the map
+/// in use.
+///
+/// The mouse: its motion since the last poll as a speed, `VICTORY_MOUSE_SENS`
+/// (1 unless set; 2 turns twice as fast) times 1/2500 of the full stick for a
+/// count a second, smoothed over about two polls, then past the title's dead
+/// zone (`VICTORY_MOUSE_DEADZONE`, 0.15) and through `VICTORY_MOUSE_CURVE`
+/// (0.7: small motions turn more than in proportion, as the title's stick
+/// curve takes them back); `VICTORY_MOUSE_INVERT_Y=1` turns it upside down.
+/// With the mouse still the stick is let go within a poll or two.
+#[derive(Default)]
+struct Pc {
+    /// The mouse's position at the last poll, and when that was.
+    last: Option<((i64, i64), Instant)>,
+    stick: (f32, f32),
+    driving: bool,
+    /// F and G down at the last poll.
+    switch_keys: (bool, bool),
+}
+
+fn pc_controls() -> bool {
+    std::env::var_os("VICTORY_PC_CONTROLS").is_some_and(|v| v == "1")
+}
+
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).filter(|v: &f32| v.is_finite()).unwrap_or(default)
+}
+
+/// A stick value for a smoothed mouse speed in full sticks (see [`Pc`]).
+fn mouse_axis(v: f32, deadzone: f32, curve: f32) -> f32 {
+    let m = v.abs();
+    if m < 0.002 {
+        return 0.0;
+    }
+    (deadzone + (1.0 - deadzone) * m.min(1.0).powf(curve)).min(1.0).copysign(v)
+}
+
+const VK_SPACE: u8 = 0x20;
+const VK_LSHIFT: u8 = 0xA0;
+const VK_RSHIFT: u8 = 0xA1;
+const VK_LCONTROL: u8 = 0xA2;
+const VK_RCONTROL: u8 = 0xA3;
+
+impl Pc {
+    fn pad(&mut self, keys: &[KeyState], mouse: Option<MouseState>, now: Instant) -> PadState {
+        let held = |vk: u8| keys.iter().any(|k| k.virtual_key == vk);
+        let on = |vk: u8| if held(vk) { 1.0 } else { 0.0 };
+        // The driving map, switched by F (which also gets in or out) and G.
+        let (f, g) = (held(b'F'), held(b'G'));
+        if (f && !self.switch_keys.0) || (g && !self.switch_keys.1) {
+            self.driving = !self.driving;
+        }
+        self.switch_keys = (f, g);
+        victory_gpu::PC_CONTROLS_DRIVING.store(self.driving, Ordering::Relaxed);
+        // The mouse.
+        let (mut rx, mut ry, mut buttons) = (0.0, 0.0, 0);
+        if let Some(m) = mouse {
+            buttons = m.buttons;
+            let at = (m.position_x, m.position_y);
+            if let Some((before, then)) = self.last {
+                let dt = (now - then).as_secs_f32().clamp(0.001, 0.1);
+                let full = 2500.0 / env_f32("VICTORY_MOUSE_SENS", 1.0).max(0.05);
+                let speed = ((at.0 - before.0) as f32 / dt / full, -((at.1 - before.1) as f32) / dt / full);
+                if at == before {
+                    // Still: let go rather than drift.
+                    self.stick = (self.stick.0 * 0.3, self.stick.1 * 0.3);
+                } else {
+                    let k = 0.55;
+                    self.stick.0 += (speed.0 - self.stick.0) * k;
+                    self.stick.1 += (speed.1 - self.stick.1) * k;
+                }
+            }
+            self.last = Some((at, now));
+            let dz = env_f32("VICTORY_MOUSE_DEADZONE", 0.15).clamp(0.0, 0.9);
+            let curve = env_f32("VICTORY_MOUSE_CURVE", 0.7).clamp(0.2, 3.0);
+            rx = mouse_axis(self.stick.0, dz, curve);
+            ry = mouse_axis(self.stick.1, dz, curve);
+            if std::env::var_os("VICTORY_MOUSE_INVERT_Y").is_some_and(|v| v == "1") {
+                ry = -ry;
+            }
+        } else {
+            (self.last, self.stick) = (None, (0.0, 0.0));
+        }
+        let (left_mouse, right_mouse) = (buttons & 1 != 0, buttons & 2 != 0);
+        // Shift runs: A tapped ten times a second while it is held, as the title wants it.
+        let shift = held(VK_LSHIFT) || held(VK_RSHIFT);
+        let tap = std::env::var_os("VICTORY_SPRINT_TAP").is_none_or(|v| v != "0");
+        static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+        let sprint = shift && (!tap || now.saturating_duration_since(*EPOCH).as_millis() % 100 < 50);
+        let mut bits = 0;
+        let mut press = |yes: bool, bit: u32| {
+            if yes {
+                bits |= bit;
+            }
+        };
+        press(sprint || held(0x0D), A);
+        press(held(b'R') || held(0x08), B);
+        press(f, Y);
+        press(held(0x1B), MENU);
+        press(held(b'V'), VIEW);
+        press(held(0x26), UP);
+        press(held(0x28), DOWN);
+        press(held(0x25), LEFT);
+        press(held(0x27), RIGHT);
+        press(held(b'C'), RIGHT_STICK);
+        if self.driving {
+            press(held(VK_SPACE), RIGHT_SHOULDER);
+            press(left_mouse, LEFT_SHOULDER);
+            press(held(b'E'), LEFT_STICK);
+            press(held(b'Q'), RIGHT_SHOULDER);
+            PadState {
+                buttons: bits,
+                left_trigger: on(b'S'),
+                right_trigger: on(b'W'),
+                left_x: on(b'D') - on(b'A'),
+                left_y: 0.0,
+                right_x: rx,
+                right_y: ry,
+            }
+        } else {
+            press(held(VK_SPACE), X);
+            press(held(b'Q'), RIGHT_SHOULDER);
+            press(held(0x09), LEFT_SHOULDER);
+            press(held(VK_LCONTROL) || held(VK_RCONTROL), LEFT_STICK);
+            press(held(b'E'), RIGHT);
+            PadState {
+                buttons: bits,
+                left_trigger: if right_mouse { 1.0 } else { 0.0 },
+                right_trigger: if left_mouse { 1.0 } else { 0.0 },
+                left_x: on(b'D') - on(b'A'),
+                left_y: on(b'W') - on(b'S'),
+                right_x: rx,
+                right_y: ry,
+            }
+        }
+    }
+}
+
 /// Two pads as one: buttons of both, and of each axis and trigger the one
 /// pushed further.
 fn merged(a: PadState, b: PadState) -> PadState {
@@ -393,6 +543,8 @@ struct State {
     pending: Vec<Event>,
     /// Device callbacks running now: token and thread.
     running: Vec<(u64, ThreadId)>,
+    /// The PC layout's state ([`Pc`]).
+    pc: Pc,
 }
 
 pub struct Hub {
@@ -440,6 +592,7 @@ impl Hub {
                 callbacks: Vec::new(),
                 pending: Vec::new(),
                 running: Vec::new(),
+                pc: Pc::default(),
             }),
             returned: Condvar::new(),
         }));
@@ -528,8 +681,11 @@ impl State {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
         self.update(devices, MOUSE, mouse.map(Value::Mouse), now, &mut events);
+        let pc = pc_controls();
+        victory_gpu::PC_CONTROLS_ON.store(pc, Ordering::Relaxed);
+        let stand_in = if pc { self.pc.pad(&keys, mouse, Instant::now()) } else { fallback(&keys) };
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads.into_iter().flatten().fold(stand_in, merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -538,7 +694,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| Value::Pad(stand_in));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events

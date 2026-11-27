@@ -46,6 +46,10 @@ mod host;
 /// The F1 settings menu is shown (`host/menu.rs`): the title gets no keyboard meanwhile
 /// (read by the input module).
 pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The PC keyboard-and-mouse layout is in use (`VICTORY_PC_CONTROLS`, written by the input
+/// module), and whether it is in its driving map: the key legend (F2, `host/panel.rs`) shows it.
+pub static PC_CONTROLS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static PC_CONTROLS_DRIVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
