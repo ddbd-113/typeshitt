@@ -263,7 +263,21 @@ pub extern "system" fn CreateWindowExA(
 /// its proportions, and centred; what it shows is scaled to it (the swap
 /// chain stretches). `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller
 /// limit without changing the title's render targets.
+///
+/// `VICTORY_WINDOW_AREA=X,Y,WIDTH,HEIGHT` (screen coordinates, e.g. another
+/// monitor's work area): the top-level window is made inside that rectangle
+/// instead, fitted and centred there, whatever its size, so that it never
+/// opens on the primary monitor.
 fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
+    if parent.is_null()
+        && let Some(area) = window_area()
+    {
+        let (w, h) = if width > 0 && height > 0 { fit_with_limit(&area, width, height, window_limit()) } else { (area.right - area.left, area.bottom - area.top) };
+        let left = area.left + (area.right - area.left - w) / 2;
+        let top = area.top + (area.bottom - area.top - h) / 2;
+        tracing::info!(width, height, to = ?(left, top, w, h), "title window made inside VICTORY_WINDOW_AREA");
+        return (left, top, w, h);
+    }
     let mut area = RECT::default();
     // SAFETY: `area` receives the primary monitor's work area.
     let known =
@@ -278,6 +292,26 @@ fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32,
     let left = area.left + (area.right - area.left - w) / 2;
     let top = area.top + (area.bottom - area.top - h) / 2;
     (left, top, w, h)
+}
+
+/// `X,Y,WIDTH,HEIGHT` as a rectangle, if the size is positive.
+fn parse_window_area(value: &str) -> Option<RECT> {
+    let n: Vec<i32> = value.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+    let [x, y, w, h] = n[..] else { return None };
+    (w > 0 && h > 0).then_some(RECT { left: x, top: y, right: x + w, bottom: y + h })
+}
+
+fn window_area() -> Option<RECT> {
+    static AREA: std::sync::OnceLock<Option<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
+    let a = *AREA.get_or_init(|| {
+        let value = std::env::var_os("VICTORY_WINDOW_AREA")?;
+        let parsed = value.to_str().and_then(parse_window_area);
+        if parsed.is_none() {
+            tracing::warn!(?value, "ignoring invalid VICTORY_WINDOW_AREA; expected X,Y,WIDTH,HEIGHT");
+        }
+        parsed.map(|r| (r.left, r.top, r.right, r.bottom))
+    });
+    a.map(|(left, top, right, bottom)| RECT { left, top, right, bottom })
 }
 
 fn parse_window_limit(value: &str) -> Option<(i32, i32)> {
@@ -648,6 +682,15 @@ mod tests {
             bottom: 1440,
         };
         assert_eq!(fit_with_limit(&area, 1600, 1200, Some((1920, 1080))), (1440, 1080));
+    }
+
+    #[test]
+    fn window_area_is_four_numbers_with_a_positive_size() {
+        let r = parse_window_area("-1920, 561,1920,1032").unwrap();
+        assert_eq!((r.left, r.top, r.right, r.bottom), (-1920, 561, 0, 1593));
+        for bad in ["", "1,2,3", "1,2,0,4", "1,2,3,-4", "a,b,c,d", "1,2,3,4,5"] {
+            assert!(parse_window_area(bad).is_none(), "{bad:?}");
+        }
     }
 
     #[test]

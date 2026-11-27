@@ -1,0 +1,10 @@
+# Keys from the game's window appearing to play: "<seconds after the window> <key> [hold s]".
+# Enter is the pad's A: the account screen ("PLAYER A") loads the last save, which opens with a cutscene.
+# Keys stop as soon as play is seen (over 2,500 draws a frame three seconds running).
+20 Enter
+35 Enter
+50 Enter
+65 Enter
+80 Enter
+100 Enter
+120 Enter

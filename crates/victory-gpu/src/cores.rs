@@ -2,9 +2,9 @@
 //! of cores. `cpu_sets` and `keep_on_fast_cores` are fxceless/victory-fork's
 //! (`framelog.rs`, commit 0b0074e0, GPL-3.0-or-later, as this).
 
-/// The system's processor sets of group 0: each one's id and its efficiency
-/// class (higher is faster).
-fn cpu_sets() -> Vec<(u32, u8)> {
+/// The system's processor sets of group 0: each one's id, its efficiency
+/// class (higher is faster) and its logical processor's number.
+fn cpu_sets() -> Vec<(u32, u8, u8)> {
     use windows_sys::Win32::System::SystemInformation::{GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut bytes = 0u32;
@@ -24,18 +24,75 @@ fn cpu_sets() -> Vec<(u32, u8)> {
         // SAFETY: the record's type is CpuSet (the only one there is).
         let set = unsafe { &info.Anonymous.CpuSet };
         if set.Group == 0 {
-            sets.push((set.Id, set.EfficiencyClass));
+            sets.push((set.Id, set.EfficiencyClass, set.LogicalProcessorIndex));
         }
         at += info.Size as usize;
     }
     sets
 }
 
-/// The sets of the fastest class, if there are slower ones too.
-fn fast_of(sets: &[(u32, u8)]) -> Vec<u32> {
+/// The last-level caches of group 0: each one's bytes and the mask of the
+/// logical processors that share it.
+fn l3_caches() -> Vec<(u32, u64)> {
+    use windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformationEx;
+    const RELATION_CACHE: i32 = 2;
+    let mut bytes = 0u32;
+    // SAFETY: a size query, then the call into a buffer of that size.
+    unsafe { GetLogicalProcessorInformationEx(RELATION_CACHE, std::ptr::null_mut(), &mut bytes) };
+    let mut buffer = vec![0u64; (bytes as usize).div_ceil(8).max(1)];
+    // SAFETY: as above; the buffer holds `bytes` bytes, aligned for the records.
+    let ok = unsafe { GetLogicalProcessorInformationEx(RELATION_CACHE, buffer.as_mut_ptr().cast(), &mut bytes) };
+    let raw = buffer.as_ptr().cast::<u8>();
+    let read = |at: usize, n: usize| -> u64 {
+        let mut v = 0u64;
+        for i in 0..n {
+            // SAFETY: inside the `bytes` the call wrote (checked by the caller).
+            v |= u64::from(unsafe { *raw.add(at + i) }) << (8 * i);
+        }
+        v
+    };
+    let mut caches = Vec::new();
+    let mut at = 0usize;
+    // A record: relationship (4), size (4), then CACHE_RELATIONSHIP: level
+    // (1), associativity (1), line size (2), cache size (4), type (4), 18
+    // reserved, group count (2), then GROUP_AFFINITY: mask (8), group (2).
+    while ok != 0 && at + 50 <= bytes as usize {
+        let size = read(at + 4, 4) as usize;
+        if size == 0 {
+            break;
+        }
+        let (level, cache, group) = (read(at + 8, 1), read(at + 12, 4) as u32, read(at + 48, 2));
+        if level == 3 && group == 0 {
+            caches.push((cache, read(at + 40, 8)));
+        }
+        at += size;
+    }
+    caches
+}
+
+/// The sets the threads a frame waits for are asked to run on, if not all of
+/// them: of the fastest class, where there are slower ones; else, where the
+/// last-level caches differ in size (AMD's X3D parts: one die with the
+/// stacked cache, one without), those under the largest
+/// (`VICTORY_CACHE_CORES=0`: not).
+fn fast_of(sets: &[(u32, u8, u8)], l3: &[(u32, u64)]) -> Vec<u32> {
     let best = sets.iter().map(|c| c.1).max().unwrap_or(0);
     let fast: Vec<u32> = sets.iter().filter(|c| c.1 == best).map(|c| c.0).collect();
-    if fast.len() == sets.len() { Vec::new() } else { fast }
+    if fast.len() != sets.len() {
+        return fast;
+    }
+    if std::env::var_os("VICTORY_CACHE_CORES").is_some_and(|v| v == "0") {
+        return Vec::new();
+    }
+    let (Some(most), Some(least)) = (l3.iter().map(|c| c.0).max(), l3.iter().map(|c| c.0).min()) else {
+        return Vec::new();
+    };
+    if most == least {
+        return Vec::new();
+    }
+    let mask = l3.iter().filter(|c| c.0 == most).fold(0u64, |m, c| m | c.1);
+    let rich: Vec<u32> = sets.iter().filter(|c| c.2 < 64 && mask >> c.2 & 1 != 0).map(|c| c.0).collect();
+    if rich.is_empty() || rich.len() == sets.len() { Vec::new() } else { rich }
 }
 
 /// `VICTORY_FAST_CORES`: 0: no thread asks; 1: the threads a frame waits for
@@ -96,7 +153,7 @@ fn ask(what: &str, from: u32) {
     static FAST: std::sync::OnceLock<(Vec<u32>, usize)> = std::sync::OnceLock::new();
     let (fast, of) = FAST.get_or_init(|| {
         let sets = cpu_sets();
-        (fast_of(&sets), sets.len())
+        (fast_of(&sets, &l3_caches()), sets.len())
     });
     // All alike (or nothing known): nothing to ask for.
     if fast.is_empty() {
@@ -165,10 +222,21 @@ mod tests {
 
     #[test]
     fn the_fast_cores_are_those_of_the_best_class_if_there_is_a_worse_one() {
-        assert_eq!(fast_of(&[(256, 1), (257, 1), (258, 0)]), [256, 257]);
-        assert!(fast_of(&[(256, 0), (257, 0)]).is_empty());
-        assert!(fast_of(&[]).is_empty());
+        assert_eq!(fast_of(&[(256, 1, 0), (257, 1, 1), (258, 0, 2)], &[]), [256, 257]);
+        assert!(fast_of(&[(256, 0, 0), (257, 0, 1)], &[]).is_empty());
+        assert!(fast_of(&[], &[]).is_empty());
         assert!(!cpu_sets().is_empty());
+        let _ = l3_caches();
+    }
+
+    #[test]
+    fn on_one_class_the_cores_under_the_largest_last_level_cache_are_asked_for() {
+        let sets = [(256, 0, 0), (257, 0, 1), (258, 0, 2), (259, 0, 3)];
+        // 96 MB under processors 0 and 1, 32 MB under 2 and 3 (an X3D part).
+        assert_eq!(fast_of(&sets, &[(96 << 20, 0b0011), (32 << 20, 0b1100)]), [256, 257]);
+        // Caches alike: nothing to ask for.
+        assert!(fast_of(&sets, &[(32 << 20, 0b0011), (32 << 20, 0b1100)]).is_empty());
+        assert!(fast_of(&sets, &[(32 << 20, 0b1111)]).is_empty());
         std::thread::spawn(|| keep_on_fast_cores("test")).join().unwrap();
     }
 }
