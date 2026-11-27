@@ -83,6 +83,11 @@ $settings = @{
     VICTORY_LEAVE_OUT = '02384a60fda6f2d0,731a39171b568298'
     # Pipelines the title makes are written down, so `victory warm` can make them ahead
     VICTORY_PIPELINE_BOOK = '1'
+    # Less of the PC's memory: windows of title memory (the title's own vertices and constants) in the card's
+    # memory the CPU writes through the bus (resizable BAR), up to 3 GB and only while a fifth of the card is
+    # free, and cut on a 1 MB grid instead of 4 MB. RTX 5070 Ti, 32 GB, 150 s: 2.4 GB less private, 2.5 GB more
+    # available at the end, the same frame rate (runs rel-base-b and rel-winbar-kb1024).
+    VICTORY_WINDOWS_BAR_MB = '3072'; VICTORY_WINDOW_KB = '1024'
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
