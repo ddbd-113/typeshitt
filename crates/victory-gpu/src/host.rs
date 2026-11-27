@@ -9263,6 +9263,7 @@ struct Presenter {
     composer: Option<crate::compose::Composer>,
     /// The numbers panel (F3), in every build.
     panel: panel::Panel,
+    legend: panel::Legend,
     /// The F1 settings menu.
     menu: menu::Menu,
 }
@@ -10001,6 +10002,7 @@ impl Host {
                 crate::popwatch::take(&self.device, list, texture)
             };
             p.panel.draw(self, copy, &back, (width, height), format);
+            p.legend.draw(self, copy, &back, (width, height), format);
             p.menu.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
@@ -10062,6 +10064,7 @@ impl Host {
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
             p.panel.frame(p.meter.line_due());
+            p.legend.frame();
             p.menu.frame();
             p.meter.frame(p.hwnd);
             showing.end();
@@ -10150,6 +10153,7 @@ impl Host {
                 meter: Meter::new(),
                 composer: None,
                 panel: panel::Panel::new(),
+                legend: panel::Legend::new(),
                 menu: menu::Menu::new(),
             })
         }

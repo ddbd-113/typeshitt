@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F3};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F2, VK_F3};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use super::font::{colours, glyph};
@@ -393,6 +393,169 @@ impl Panel {
             list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
         }
         self.cost += began.elapsed();
+    }
+}
+
+/// The key legend (F2; `VICTORY_KEY_LEGEND=1` shows it from the start, the
+/// launcher's default with the PC layout): which key presses which of the
+/// pad's buttons in the PC layout of the keyboard and mouse
+/// (`victory_hle`'s `gameinput`), in the map in use (walking or driving), so
+/// that the title's pad prompts can be read off it. In the same dot letters
+/// as the stats panel, at the right edge of the picture.
+pub(super) fn legend_shown() -> &'static AtomicBool {
+    static SHOWN: OnceLock<AtomicBool> = OnceLock::new();
+    SHOWN.get_or_init(|| AtomicBool::new(crate::switch::on("VICTORY_KEY_LEGEND")))
+}
+
+/// F2 was pressed since the last call, with one of our windows in front.
+fn legend_pressed() -> bool {
+    static DOWN: AtomicBool = AtomicBool::new(false);
+    // SAFETY: a plain query.
+    let down = unsafe { GetAsyncKeyState(i32::from(VK_F2)) } < 0;
+    if DOWN.swap(down, Ordering::Relaxed) || !down {
+        return false;
+    }
+    let mut process = 0;
+    // SAFETY: plain queries; room for the answer.
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut process) };
+    process == std::process::id()
+}
+
+/// The legend's lines for the walking map or the driving one.
+fn legend_text(driving: bool) -> Vec<String> {
+    let mut lines = vec![if driving {
+        "KLAWISZE: AUTO   (G PIESZO, F2 UKRYJ)"
+    } else {
+        "KLAWISZE: PIESZO   (G AUTO, F2 UKRYJ)"
+    }
+    .to_owned()];
+    let rest: &[&str] = if driving {
+        &[
+            "RT = W (GAZ)      LT = S (HAMULEC)",
+            "RB = SPACJA (RECZNY)   LB = LPM",
+            "Y = F (WYSIADZ)   L3 = E (KLAKSON)",
+            "A = SHIFT/ENTER   B = R/BACKSPACE",
+            "R3 = C (ZA SIEBIE)   KAMERA = MYSZ",
+            "VIEW = V          MENU = ESC",
+            "KRZYZAK = STRZALKI",
+        ]
+    } else {
+        &[
+            "A = SHIFT (BIEG) / ENTER",
+            "X = SPACJA (SKOK)   Y = F (AUTO)",
+            "B = R (PRZELADUJ) / BACKSPACE",
+            "LT = PPM (CEL)    RT = LPM (STRZAL)",
+            "LB = TAB (BRONIE)   RB = Q (OSLONA)",
+            "L3 = CTRL   R3 = C   VIEW = V",
+            "KRZYZAK = STRZALKI, PRAWO = E",
+            "MENU = ESC        KAMERA = MYSZ",
+        ]
+    };
+    lines.extend(rest.iter().map(|l| (*l).to_owned()));
+    lines
+}
+
+/// The legend of a presenter.
+pub(super) struct Legend {
+    driving: Option<bool>,
+    lines: Vec<String>,
+    changed: bool,
+    buffers: Option<Buffers>,
+    failed: bool,
+}
+
+impl Legend {
+    pub(super) fn new() -> Legend {
+        Legend { driving: None, lines: Vec::new(), changed: false, buffers: None, failed: false }
+    }
+
+    fn on() -> bool {
+        legend_shown().load(Ordering::Relaxed)
+            && crate::PC_CONTROLS_ON.load(Ordering::Relaxed)
+            && !crate::SETTINGS_MENU_OPEN.load(Ordering::Relaxed)
+    }
+
+    /// A frame was presented.
+    pub(super) fn frame(&mut self) {
+        if legend_pressed() {
+            legend_shown().fetch_xor(true, Ordering::Relaxed);
+        }
+        if !Legend::on() {
+            return;
+        }
+        let driving = crate::PC_CONTROLS_DRIVING.load(Ordering::Relaxed);
+        if self.driving != Some(driving) {
+            self.driving = Some(driving);
+            self.lines = legend_text(driving);
+            self.changed = true;
+        }
+    }
+
+    /// Records the copy of the box onto `back` at its right edge, a little
+    /// above the middle (the title keeps its own help in the upper left and
+    /// its map in the lower left).
+    pub(super) fn draw(
+        &mut self,
+        host: &Host,
+        list: &HostList,
+        back: &ID3D12Resource,
+        (width, height): (u32, u32),
+        format: DXGI_FORMAT,
+    ) {
+        if !Legend::on() || self.lines.is_empty() || self.failed {
+            return;
+        }
+        let scale = scale(height);
+        if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
+            std::mem::forget(self.buffers.take());
+            self.buffers = Buffers::new(host, format, scale);
+            self.failed = self.buffers.is_none();
+            self.changed = true;
+        }
+        let Some(buffers) = &mut self.buffers else { return };
+        if std::mem::take(&mut self.changed) {
+            buffers.write(&self.lines);
+        }
+        let (w, h) = size(scale);
+        if w > width || h > height {
+            return;
+        }
+        let (x, y) = (width - w, (height * 3 / 10).min(height - h));
+        let list = &list.list;
+        // SAFETY: an open list and live resources; the box lies within both.
+        unsafe {
+            if std::mem::take(&mut buffers.fresh) {
+                list.CopyResource(&buffers.card, &buffers.uploads[buffers.turn].0);
+                list.ResourceBarrier(&[transition(
+                    &buffers.card,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+            }
+            let from = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&buffers.card),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: format,
+                            Width: w,
+                            Height: h,
+                            Depth: 1,
+                            RowPitch: buffers.pitch,
+                        },
+                    },
+                },
+            };
+            let to = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(back),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let part = D3D12_BOX { left: 0, top: 0, front: 0, right: w, bottom: h, back: 1 };
+            list.CopyTextureRegion(&to, x, y, 0, &from, Some(&part));
+        }
     }
 }
 

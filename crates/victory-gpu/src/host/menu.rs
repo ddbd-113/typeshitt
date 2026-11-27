@@ -65,6 +65,11 @@ const ITEMS: &[Item] = &[
     Item { var: "VICTORY_PANEL", label: "STATS PANEL (F3)", values: &[("0", "OFF"), ("1", "ON")], live: true },
     Item { var: "VICTORY_FULLSCREEN", label: "FULLSCREEN (NO BORDER)", values: UNSET_ON, live: false },
     Item { var: "VICTORY_MOUSE_CAPTURE", label: "MOUSE CAPTURE", values: UNSET_ON, live: false },
+    Item { var: "VICTORY_PC_CONTROLS", label: "PC CONTROLS (KEYS + MOUSE)", values: &[("1", "ON"), ("", "OFF (PLAIN PAD KEYS)")], live: true },
+    Item { var: "VICTORY_MOUSE_SENS", label: "MOUSE SENSITIVITY", values: &[("1", "1"), ("0.5", "0.5"), ("0.75", "0.75"), ("1.25", "1.25"), ("1.5", "1.5"), ("2", "2"), ("3", "3")], live: true },
+    Item { var: "VICTORY_MOUSE_INVERT_Y", label: "MOUSE INVERT Y", values: UNSET_ON, live: true },
+    Item { var: "VICTORY_SPRINT_TAP", label: "SHIFT RUNS BY TAPPING A", values: &[("", "ON"), ("0", "OFF (HOLDS A)")], live: true },
+    Item { var: "VICTORY_KEY_LEGEND", label: "KEY LEGEND (F2)", values: &[("1", "ON"), ("0", "OFF")], live: true },
     Item { var: "VICTORY_IME_ENGLISH", label: "ENGLISH KEYBOARD", values: UNSET_ON, live: false },
     Item { var: "VICTORY_MENU_CONSOLE", label: "CONSOLE", values: &[("series-x", "SERIES X"), ("series-s", "SERIES S (FASTER)")], live: false },
     Item { var: "VICTORY_MENU_RES", label: "SERIES X PICTURE", values: &[("1440", "2560X1440"), ("1080to1440", "1080P TO 1440P"), ("4k", "3840X2160")], live: false },
@@ -341,6 +346,7 @@ impl Menu {
             "VICTORY_MENU_FRAMEGEN" => crate::streamline::set_framegen(value.parse().unwrap_or(0)),
             "VICTORY_FPS_LINE" => fps_line_on().store(value != "0", Ordering::Relaxed),
             "VICTORY_PANEL" => super::panel::shown().store(value == "1", Ordering::Relaxed),
+            "VICTORY_KEY_LEGEND" => super::panel::legend_shown().store(value == "1", Ordering::Relaxed),
             _ => {}
         }
     }
