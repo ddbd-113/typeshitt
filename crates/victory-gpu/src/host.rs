@@ -1240,9 +1240,11 @@ pub(crate) struct HostList {
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
-    /// The list that runs those transitions just before this one, made
-    /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    /// The list that runs those transitions just before this one, taken
+    /// when the list first has such transitions ([`lazy_prelude`]) from the
+    /// preludes lists gave back ([`PRELUDES`]) or made, and given back there
+    /// when the list is reset (its submissions have run).
+    prelude: Mutex<Option<Prelude>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -1300,6 +1302,22 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// Preludes of lists that were reset, for the next list that needs one.
+/// Each list kept its own before: 1,051 preludes for 1,503 host lists (run
+/// diag-x1440-dlssq-memmap), an allocator and a list each, which on NVIDIA's
+/// driver hold some 2 MB of commit apiece (5.3 GB grew while lists were
+/// made), when only the lists in the air need one.
+/// `VICTORY_SHARED_PRELUDES=0`: each list keeps its own, as before.
+static PRELUDES: Mutex<Vec<Prelude>> = Mutex::new(Vec::new());
+
+/// The most preludes [`PRELUDES`] keeps.
+const PRELUDES_KEPT: usize = 256;
+
+fn shared_preludes() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SHARED_PRELUDES").is_none_or(|v| v != "0"))
+}
 
 /// Whether the new host list each of the title's lists gets when it is
 /// submitted is left open for the title's next reset ([`HostList::leave_open`];
@@ -4221,9 +4239,9 @@ impl Host {
                 &allocator,
                 None,
             )?;
-            let prelude = OnceLock::new();
+            let prelude = Mutex::new(None);
             if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
+                *prelude.lock().unwrap_or_else(|e| e.into_inner()) = self.make_prelude();
             }
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
@@ -6578,6 +6596,16 @@ impl HostList {
         self._alive.used();
         self.upscale.store(0, Ordering::Relaxed);
         self.hudless.store(0, Ordering::Relaxed);
+        // Its submissions have run: its prelude goes to the next list that
+        // needs one.
+        if shared_preludes() && lazy_prelude() {
+            if let Some(prelude) = self.prelude.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let mut pool = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+                if pool.len() < PRELUDES_KEPT {
+                    pool.push(prelude);
+                }
+            }
+        }
         *self.coming.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -7044,11 +7072,12 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
             return None;
         }
-        let Some((allocator, list)) = self
-            .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
-            .as_ref()
-        else {
+        let mut held = self.prelude.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            let pooled = if shared_preludes() { PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).pop() } else { None };
+            *held = pooled.or_else(|| host().and_then(|h| h.make_prelude()));
+        }
+        let Some((allocator, list)) = held.as_ref() else {
             fail(format_args!("no host list for a state prelude"));
         };
         // SAFETY: the prelude is not executing (every submission is waited
