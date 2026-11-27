@@ -87,7 +87,7 @@ $settings = @{
     # memory the CPU writes through the bus (resizable BAR), up to 3 GB and only while a fifth of the card is
     # free, and cut on a 1 MB grid instead of 4 MB. RTX 5070 Ti, 32 GB, 150 s: 2.4 GB less private, 2.5 GB more
     # available at the end, the same frame rate (runs rel-base-b and rel-winbar-kb1024).
-    VICTORY_WINDOWS_BAR_MB = '3072'; VICTORY_WINDOW_KB = '1024'
+    VICTORY_WINDOWS_BAR_MB = '3072'; VICTORY_WINDOW_KB = '1024'   # the BAR part: not with frame generation on (below)
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
@@ -109,6 +109,9 @@ if ($Dlss -ne 'off') {
         Write-Host "repository folder fetches them from NVIDIA once (about 70 MB); VICTORY_STREAMLINE_DIR names another folder."
     }
 }
+# Frame generation on from the start needs the fifth of the card that windows in its memory would take (its share
+# of generated frames fell from 1.66 to 1.15 with them, run rel-newdefaults-fg2).
+if ($settings.VICTORY_FRAMEGEN -eq '1' -and $settings.VICTORY_FRAMEGEN_X -ne '0') { $settings.Remove('VICTORY_WINDOWS_BAR_MB') }
 if ($fpsWanted -gt 0) { $settings.VICTORY_FRAME_INTERVAL_US = [string][int][math]::Round(1000000 / $fpsWanted) }
 foreach ($k in $menu.Keys) {
     if ($k -like 'VICTORY_MENU_*') { continue }
